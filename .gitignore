@@ -1,0 +1,5 @@
+config.ini
+wordlist*
+.idea
+venv
+data*
