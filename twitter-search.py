@@ -2,76 +2,137 @@ from TwitterSearch import *
 import configparser
 import json
 import os
+import logging
+import argparse
+
+logger = logging.getLogger(__name__)
+h = logging.StreamHandler()
+h.setFormatter(logging.Formatter('%(asctime)s %(levelname)8s %(name)s | %(message)s'))
+logger.addHandler(h)
+logger.setLevel(logging.DEBUG)
 
 
-try:
+config = configparser.ConfigParser()
+config.read('config.ini')
 
-    try:
-        with open('wordlist', 'rU') as infile:
-            wordSet = [line.strip() for line in infile]
+DICT_NAME = None
+CLEAN_USERS_LIST = None
 
-        with open('wordlist_clean_users', 'rU') as infile:
-            users_ids = [line.strip() for line in infile]
 
-        with open('data.json', 'rU') as json_file:
-            tweets_dict = json.load(json_file)
+def set_dict_name(name):
+    global DICT_NAME
+    DICT_NAME = name
 
-    except IOError:
-        raise IOError
 
-    # First clean up the twits
-    new_tweets_dict = dict()
-    for tweet in tweets_dict:
-        if tweets_dict[tweet]['user']['id_str'] not in users_ids:
-            new_tweets_dict[tweet] = tweets_dict[tweet]
+def set_clean_users(users_list):
+    global CLEAN_USERS_LIST
+    CLEAN_USERS_LIST = users_list
 
-    with open('data.json', 'w') as outfile:
-        json.dump(new_tweets_dict, outfile, indent=4)
-    print("cleaned users success")
 
-    print("searching for new twits")
-    # Search for new twits
-    tso = TwitterSearchOrder()  # create a TwitterSearchOrder object
-    tso.set_keywords(wordSet, or_operator=True)  # let's define all words we would like to have a look for
-    tso.set_language('es')  # we want to see German tweets only
-    tso.set_include_entities(False)  # and don't give us all those entity information
-
-    # it's about time to create a TwitterSearch object with our secret tokens
-    config = configparser.ConfigParser()
-    config.read('config.ini')
+def authenticate_twitter_search():
     ts = TwitterSearch(
         consumer_key=config['twitter']['consumer_key'],
         consumer_secret=config['twitter']['consumer_secret'],
         access_token=config['twitter']['access_token'],
         access_token_secret=config['twitter']['access_token_secret']
     )
+    return ts
 
-    # this is where the fun actually starts :)
-    tweets_dict = {}
 
-    # read the previous tweets
-    if os.path.exists('data.json'):
-        with open('data.json') as json_file:
+def read_file(path):
+    with open(path, 'rU') as infile:
+        lines = [line.strip() for line in infile]
+    return lines
+
+
+def create_custom_searches(words):
+    tso_lang = TwitterSearchOrder()  # create a TwitterSearchOrder object
+    tso_lang.set_keywords(words, or_operator=True)  # let's define all words we would like to have a look for
+    tso_lang.set_language('es')  # we want to see German tweets only
+    tso_lang.set_include_entities(False)  # and don't give us all those entity information
+
+    tso_loc = TwitterSearchOrder()
+    tso_loc.set_keywords(words, or_operator=True)
+    tso_loc.set_geocode(float(config['location']['lat']),
+                        float(config['location']['long']),
+                        int(config['location']['dist']),
+                        imperial_metric=False)
+    tso_loc.set_include_entities(False)
+
+    tso_list = {
+        'lang': tso_lang,
+        'loc': tso_loc
+    }
+
+    return tso_list
+
+
+def clean_users(tso_list, users_list):
+    for tso in tso_list:
+
+        output = config['paths']['output'] + '{}_{}.json'.format(DICT_NAME, tso)
+
+        # tweets_dict = {}
+        with open(output, 'rU') as json_file:
             tweets_dict = json.load(json_file)
 
-    print("capturing twits")
+        # First clean up the twits
+        new_tweets_dict = dict()
+        count = 0
+        for tweet in tweets_dict:
+            if tweets_dict[tweet]['user']['id_str'] not in CLEAN_USERS_LIST:
+                new_tweets_dict[tweet] = tweets_dict[tweet]
+            else:
+                count += 1
 
-    for tweet in ts.search_tweets_iterable(tso):
-        tweet_existing = tweet['id_str'] not in tweets_dict.keys()
-        tweet_popular = tweet['retweet_count'] >= 2 and 'retweeted_status' not in tweet.keys()
-        tweet_user_clean = tweet['user']['id_str'] not in users_ids
-        if tweet_existing and tweet_popular and tweet_user_clean:
-            print('@%s tweeted: %s' % (tweet['user']['screen_name'], tweet['text']))
-            tweets_dict[tweet['id']] = tweet
+        with open(output, 'w') as outfile:
+            json.dump(new_tweets_dict, outfile, indent=4)
+        # print("cleaned {} tweets from {}".format(count, output))
 
-    print("writing new twits")
-    with open('data.json', 'w') as outfile:
-        json.dump(tweets_dict, outfile, indent=4)
+
+def search_new_tweets(ts, tso_list):
+    for tso in tso_list:
+        output = config['paths']['output'] + '{}_{}.json'.format(DICT_NAME, tso)
+        tweets_dict = {}
+        count = 0
+
+        if os.path.exists(output):
+            with open(output) as json_file:
+                tweets_dict = json.load(json_file)
+
+        for tweet in ts.search_tweets_iterable(tso_list[tso]):
+            tweet_existing = tweet['id_str'] not in tweets_dict.keys()
+            tweet_popular = 'retweeted_status' not in tweet.keys()
+            tweet_user_clean = tweet['user']['id_str'] not in CLEAN_USERS_LIST
+            if tweet_existing and tweet_popular and tweet_user_clean:
+                count += 1
+                # print('@%s tweeted: %s' % (tweet['user']['screen_name'], tweet['text']))
+                tweets_dict[tweet['id']] = tweet
+
+        print("writing {} new twits".format(count))
+        with open(output, 'w') as outfile:
+            json.dump(tweets_dict, outfile, indent=4)
 
     # print(tweets_dict.keys())
     print("finished running twitter-search")
 
-except TwitterSearchException as e:  # take care of all those ugly errors if there are some
-    print(e)
+
+def main():
+    parser = argparse.ArgumentParser(description='Twitter special search for a wordlist and a location')
+    parser.add_argument('dictionary', metavar='dictionary', type=str, help='dictionary file to read')
+    args = parser.parse_args()  # ['input.json', 'output.json'])
+
+    set_dict_name(args.dictionary)
+    clean_users_list = read_file('wordlist_clean_users')
+    set_clean_users(clean_users_list)
+
+    words = read_file(config['paths']['input'] + 'wordlist_{}'.format(args.dictionary))
+
+    ts = authenticate_twitter_search()
+    tso_list = create_custom_searches(words)
+    search_new_tweets(ts, tso_list)
+    clean_users(tso_list, clean_users_list)
 
 
+if __name__ == '__main__':
+    main()

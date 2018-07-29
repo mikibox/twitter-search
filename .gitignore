@@ -3,3 +3,4 @@ wordlist*
 .idea
 venv
 data*
+cron*
